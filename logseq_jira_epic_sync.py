@@ -52,7 +52,7 @@ def main():
         filename = sys.argv[1]
 
     # Load issue mapping from file
-    mapping_filename = 'issue_mapping.json'
+    mapping_filename = '/root/issue_mapping.json'
     if os.path.exists(mapping_filename):
         with open(mapping_filename, 'r') as f:
             issue_mapping = json.load(f)
