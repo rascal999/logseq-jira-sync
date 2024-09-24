@@ -5,6 +5,9 @@ import os
 import json
 import re  # Regular expressions for link conversion
 import time  # For sleep functionality
+import logging
+import configparser
+import argparse
 from jira import JIRA
 from dotenv import load_dotenv  # For loading .env file
 
@@ -44,6 +47,31 @@ def build_description_text(description_lines):
     return '\n'.join(adjusted_lines)
 
 def main():
+    # Set up argument parser
+    parser = argparse.ArgumentParser(description='Create or update Jira issues from input file.')
+    parser.add_argument('input_file', nargs='?', default='input.txt', help='Path to the input file.')
+    parser.add_argument('--config', default='config.ini', help='Path to the configuration file.')
+    args = parser.parse_args()
+
+    input_file = args.input_file
+    config_file = args.config
+
+    # Load configuration
+    config = configparser.ConfigParser()
+    config.read(config_file)
+
+    # Get settings from the configuration file
+    issue_mapping_file = config.get('Settings', 'issue_mapping_file', fallback='issue_mapping.json')
+    log_file = config.get('Settings', 'log_file', fallback='script.log')
+
+    # Set up logging
+    logging.basicConfig(
+        filename=log_file,
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s: %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
     while True:
         # Load environment variables from .env file
         load_dotenv()
@@ -55,33 +83,40 @@ def main():
         project_key = os.environ.get('JIRA_PROJECT_KEY')
 
         if not all([jira_server, jira_user, jira_token, project_key]):
-            print("Error: Jira credentials and project key must be set in the .env file.")
+            logging.error("Jira credentials and project key must be set in the .env file.")
             sys.exit(1)
 
         options = {'server': jira_server}
-        jira = JIRA(options, basic_auth=(jira_user, jira_token))
+        try:
+            jira = JIRA(options, basic_auth=(jira_user, jira_token))
+        except Exception as e:
+            logging.error(f"Failed to connect to Jira: {e}")
+            sys.exit(1)
 
         # Get the authenticated user's account ID
-        current_user = jira.myself()
-        account_id = current_user['accountId']
-
-        filename = 'input.txt'  # Or get from sys.argv
-        if len(sys.argv) > 1:
-            filename = sys.argv[1]
+        try:
+            current_user = jira.myself()
+            account_id = current_user['accountId']
+        except Exception as e:
+            logging.error(f"Failed to get current user info from Jira: {e}")
+            sys.exit(1)
 
         # Load issue mapping from file
-        mapping_filename = '/root/issue_mapping.json'
-        if os.path.exists(mapping_filename):
-            with open(mapping_filename, 'r') as f:
-                issue_mapping = json.load(f)
+        if os.path.exists(issue_mapping_file):
+            try:
+                with open(issue_mapping_file, 'r') as f:
+                    issue_mapping = json.load(f)
+            except Exception as e:
+                logging.error(f"Error reading issue mapping file '{issue_mapping_file}': {e}")
+                issue_mapping = {}
         else:
             issue_mapping = {}
 
         try:
-            with open(filename, 'r') as f:
+            with open(input_file, 'r') as f:
                 lines = f.readlines()
         except Exception as e:
-            print(f"Error reading input file '{filename}': {e}")
+            logging.error(f"Error reading input file '{input_file}': {e}")
             time.sleep(300)
             continue
 
@@ -148,15 +183,14 @@ def main():
                     # Check for levels beyond sub-task
                     level = len(stack)
                     if level > 3:
-                        print("Error: Tickets beyond sub-task detected. Exiting.")
+                        logging.error("Tickets beyond sub-task detected. Exiting.")
                         sys.exit(1)
                 elif node_content.startswith('#'):
                     # It's a relation
                     if current_node:
                         current_node.relations.append(node_content)
                     else:
-                        # No current node to attach to
-                        print(f"Warning: Relation '{node_content}' found with no parent node.")
+                        logging.warning(f"Relation '{node_content}' found with no parent node.")
                 else:
                     # It's part of the description of the current node
                     if current_node:
@@ -172,8 +206,7 @@ def main():
                     if current_node:
                         current_node.relations.append(content)
                     else:
-                        # No current node to attach to
-                        print(f"Warning: Relation '{content}' found with no parent node.")
+                        logging.warning(f"Relation '{content}' found with no parent node.")
                 else:
                     # It's a description line
                     if current_node:
@@ -216,7 +249,7 @@ def main():
                 try:
                     issue = jira.issue(issue_key)
                     node.jira_issue = issue
-                    print(f"Processing {node.type} '{node.line}' with key {issue.key}")
+                    logging.info(f"Processing {node.type} '{node.line}' with key {issue.key}")
 
                     # Retrieve current description and status
                     current_description = issue.fields.description or ''
@@ -226,7 +259,7 @@ def main():
                     if current_description.strip() != node.description_text.strip():
                         # Update description
                         issue.update(fields={'description': node.description_text})
-                        print(f"Updated description for {issue.key}")
+                        logging.info(f"Updated description for {issue.key}")
 
                     # Map custom status to Jira status
                     if node.status and node.status in status_mapping:
@@ -241,14 +274,14 @@ def main():
                                     break
                             if transition_id:
                                 jira.transition_issue(issue, transition_id)
-                                print(f"Updated status of {issue.key} to {jira_status}")
+                                logging.info(f"Updated status of {issue.key} to {jira_status}")
                     # Update assignee if necessary
                     if issue.fields.assignee is None or issue.fields.assignee.accountId != account_id:
                         issue.update(fields={'assignee': {'id': account_id}})
-                        print(f"Assigned {issue.key} to current user")
+                        logging.info(f"Assigned {issue.key} to current user")
 
                 except Exception as e:
-                    print(f"Error updating issue {issue_key}: {e}")
+                    logging.error(f"Error updating issue {issue_key}: {e}")
                     # Remove from mapping and recreate
                     del issue_mapping[node.path]
                     create_or_update_issue(node)
@@ -283,11 +316,11 @@ def main():
                 try:
                     issue = jira.create_issue(fields=issue_dict)
                     node.jira_issue = issue
-                    print(f"Created {node.type} '{node.line}' with key {issue.key}")
+                    logging.info(f"Created {node.type} '{node.line}' with key {issue.key}")
                     # Add to mapping
                     issue_mapping[node.path] = issue.key
                 except Exception as e:
-                    print(f"Error creating issue '{node.line}': {e}")
+                    logging.error(f"Error creating issue '{node.line}': {e}")
                     return
 
                 # Set status if needed
@@ -302,23 +335,23 @@ def main():
                     if transition_id:
                         try:
                             jira.transition_issue(issue, transition_id)
-                            print(f"Set status of {issue.key} to {jira_status}")
+                            logging.info(f"Set status of {issue.key} to {jira_status}")
                         except Exception as e:
-                            print(f"Error setting status for issue {issue.key}: {e}")
+                            logging.error(f"Error setting status for issue {issue.key}: {e}")
 
             # Handle relations
             for relation in node.relations:
                 # Implement relation handling
-                print(f"Handling relation '{relation}' for issue {node.jira_issue.key}")
+                logging.info(f"Handling relation '{relation}' for issue {node.jira_issue.key}")
                 # Extract issue keys from relation
                 related_issue_keys = re.findall(r'#([A-Z]+-\d+)', relation)
                 for key in related_issue_keys:
                     try:
                         related_issue = jira.issue(key)
                         jira.create_issue_link(type='Relates', inwardIssue=node.jira_issue.key, outwardIssue=related_issue.key)
-                        print(f"Linked {node.jira_issue.key} to {related_issue.key}")
+                        logging.info(f"Linked {node.jira_issue.key} to {related_issue.key}")
                     except Exception as e:
-                        print(f"Error linking issue {node.jira_issue.key} to {key}: {e}")
+                        logging.error(f"Error linking issue {node.jira_issue.key} to {key}: {e}")
 
             # Create or update child issues
             for child in node.children:
@@ -331,11 +364,15 @@ def main():
             create_or_update_issue(root)
 
         # Save issue mapping to file
-        with open(mapping_filename, 'w') as f:
-            json.dump(issue_mapping, f, indent=4)
+        try:
+            with open(issue_mapping_file, 'w') as f:
+                json.dump(issue_mapping, f, indent=4)
+            logging.info(f"Issue mapping saved to '{issue_mapping_file}'")
+        except Exception as e:
+            logging.error(f"Error saving issue mapping to '{issue_mapping_file}': {e}")
 
         # Sleep for 5 minutes before the next run
-        print("Waiting for 5 minutes before the next run...")
+        logging.info("Waiting for 5 minutes before the next run...")
         time.sleep(300)  # 300 seconds = 5 minutes
 
 if __name__ == '__main__':
