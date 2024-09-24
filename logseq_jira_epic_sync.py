@@ -15,7 +15,7 @@ class Node:
         self.parent = None
         self.type = None  # Epic, Task, Sub-task
         self.status = None  # TODO, DOING, DONE
-        self.description_lines = []  # Now stores tuples of (indent, line)
+        self.description_lines = []  # Stores tuples of (indent, line)
         self.relations = []
         self.jira_issue = None
         self.path = ''
@@ -42,6 +42,10 @@ def main():
 
     options = {'server': jira_server}
     jira = JIRA(options, basic_auth=(jira_user, jira_token))
+
+    # Get the authenticated user's account ID
+    current_user = jira.myself()
+    account_id = current_user['accountId']
 
     filename = 'input.txt'  # Or get from sys.argv
     if len(sys.argv) > 1:
@@ -190,8 +194,12 @@ def main():
                 # Process description
                 description_text = build_description_text(node.description_lines)
                 description_text = convert_markdown_links_to_jira(description_text)
-                # Update summary and description
-                issue.update(summary=node.line, description=description_text)
+                # Update summary, description, and assignee
+                issue.update(fields={
+                    'summary': node.line,
+                    'description': description_text,
+                    'assignee': {'id': account_id}
+                })
                 # Set status if needed
                 if node.status and node.status in status_mapping:
                     jira_status = status_mapping[node.status]
@@ -221,6 +229,7 @@ def main():
                 'summary': node.line,
                 'description': description_text,
                 'issuetype': {'name': node.type},
+                'assignee': {'id': account_id},  # Assign to authenticated user
             }
 
             # For Epics, set the 'Epic Name' field (adjust customfield ID as per your Jira instance)
