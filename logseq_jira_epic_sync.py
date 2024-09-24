@@ -50,7 +50,7 @@ def main():
     # Set up argument parser
     parser = argparse.ArgumentParser(description='Create or update Jira issues from input file.')
     parser.add_argument('input_file', nargs='?', default='input.txt', help='Path to the input file.')
-    parser.add_argument('--config', default='config.ini', help='Path to the configuration file.')
+    parser.add_argument('--config', default='/root/config.ini', help='Path to the configuration file.')
     args = parser.parse_args()
 
     input_file = args.input_file
