@@ -5,7 +5,7 @@ import os
 import json
 import re  # Regular expressions for link conversion
 from jira import JIRA
-from dotenv import load_dotenv  # Added import for loading .env file
+from dotenv import load_dotenv  # For loading .env file
 
 class Node:
     def __init__(self, indent, line):
@@ -15,7 +15,7 @@ class Node:
         self.parent = None
         self.type = None  # Epic, Task, Sub-task
         self.status = None  # TODO, DOING, DONE
-        self.description_lines = []
+        self.description_lines = []  # Now stores tuples of (indent, line)
         self.relations = []
         self.jira_issue = None
         self.path = ''
@@ -63,8 +63,9 @@ def main():
     stack = []
     root_nodes = []
     current_node = None
+    current_indent = 0
 
-    for line in lines:
+    for idx, line in enumerate(lines):
         # Remove the newline at the end and expand tabs
         line = line.rstrip('\n').expandtabs(4)
 
@@ -88,7 +89,7 @@ def main():
 
         # Check if line starts with '- '
         if content.startswith('- '):
-            # Determine if it's a new node or description
+            # Determine if it's a new node, description, or relation
             node_content = content[2:].strip()
             # Check for status
             status = None
@@ -115,34 +116,44 @@ def main():
                     root_nodes.append(node)
                 stack.append(node)
                 current_node = node
+                current_indent = indent
 
                 # Check for levels beyond sub-task
                 level = len(stack)
                 if level > 3:
                     print("Error: Tickets beyond sub-task detected. Exiting.")
                     sys.exit(1)
-
+            elif node_content.startswith('#'):
+                # It's a relation
+                if current_node:
+                    current_node.relations.append(node_content)
+                else:
+                    # No current node to attach to
+                    print(f"Warning: Relation '{node_content}' found with no parent node.")
             else:
                 # It's part of the description of the current node
                 if current_node:
-                    description_line = content[2:].strip()
-                    current_node.description_lines.append('- ' + description_line)
+                    description_line = node_content
+                    current_node.description_lines.append((indent, description_line))
                 else:
                     # No current node, ignore
                     pass
         else:
-            # Line does not start with '- ', it's either description or relation
-            # Attach to current_node
-            if current_node:
-                if content.startswith('#'):
-                    # It's a relation
+            # Line does not start with '- ', it could be description or relation
+            if content.startswith('#'):
+                # It's a relation
+                if current_node:
                     current_node.relations.append(content)
                 else:
-                    # It's a description line
-                    current_node.description_lines.append(content)
+                    # No current node to attach to
+                    print(f"Warning: Relation '{content}' found with no parent node.")
             else:
-                # No current node, ignore
-                pass
+                # It's a description line
+                if current_node:
+                    current_node.description_lines.append((indent, content))
+                else:
+                    # No current node, ignore
+                    pass
 
     # Assign types to nodes and compute paths
     def assign_types_and_paths(node, level=1, path=''):
@@ -177,7 +188,7 @@ def main():
                 node.jira_issue = issue
                 print(f"Updating {node.type} '{node.line}' with key {issue.key}")
                 # Process description
-                description_text = '\n'.join(node.description_lines).strip()
+                description_text = build_description_text(node.description_lines)
                 description_text = convert_markdown_links_to_jira(description_text)
                 # Update summary and description
                 issue.update(summary=node.line, description=description_text)
@@ -202,7 +213,7 @@ def main():
         else:
             # Issue does not exist, create it
             # Process description
-            description_text = '\n'.join(node.description_lines).strip()
+            description_text = build_description_text(node.description_lines)
             description_text = convert_markdown_links_to_jira(description_text)
 
             issue_dict = {
@@ -250,8 +261,17 @@ def main():
 
         # Handle relations
         for relation in node.relations:
-            # Implement relation handling as needed
-            pass
+            # Implement relation handling
+            print(f"Handling relation '{relation}' for issue {node.jira_issue.key}")
+            # Extract issue keys from relation
+            related_issue_keys = re.findall(r'#([A-Z]+-\d+)', relation)
+            for key in related_issue_keys:
+                try:
+                    related_issue = jira.issue(key)
+                    jira.create_issue_link(type='Relates', inwardIssue=node.jira_issue.key, outwardIssue=related_issue.key)
+                    print(f"Linked {node.jira_issue.key} to {related_issue.key}")
+                except Exception as e:
+                    print(f"Error linking issue {node.jira_issue.key} to {key}: {e}")
 
         # Create or update child issues
         for child in node.children:
@@ -259,6 +279,21 @@ def main():
             if child.type == 'Sub-task':
                 child.parent = node
             create_or_update_issue(child)
+
+    def build_description_text(description_lines):
+        if not description_lines:
+            return ''
+        # Find the minimum indentation level among description lines
+        min_indent = min(indent for indent, _ in description_lines)
+        # Adjust lines to have relative indentation and convert to Jira nested list syntax
+        adjusted_lines = []
+        for indent, line in description_lines:
+            relative_indent = (indent - min_indent) // 4  # Assuming 4 spaces per level
+            # Use multiple '*' for nested lists in Jira
+            bullet = '*' * (relative_indent + 1)
+            adjusted_line = f"{bullet} {line}"
+            adjusted_lines.append(adjusted_line)
+        return '\n'.join(adjusted_lines)
 
     for root in root_nodes:
         create_or_update_issue(root)
