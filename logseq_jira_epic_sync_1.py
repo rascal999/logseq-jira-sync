@@ -20,28 +20,12 @@ class Node:
         self.relations = []
         self.jira_issue = None
         self.path = ''
-        self.description_text = ''  # Stores the final description text
 
 def convert_markdown_links_to_jira(text):
     # Regular expression pattern to find markdown links: [text](URL)
     pattern = r'\[([^\]]+)\]\(([^\)]+)\)'
     replacement = r'[\1|\2]'
     return re.sub(pattern, replacement, text)
-
-def build_description_text(description_lines):
-    if not description_lines:
-        return ''
-    # Find the minimum indentation level among description lines
-    min_indent = min(indent for indent, _ in description_lines)
-    # Adjust lines to have relative indentation and convert to Jira nested list syntax
-    adjusted_lines = []
-    for indent, line in description_lines:
-        relative_indent = (indent - min_indent) // 4  # Assuming 4 spaces per level
-        # Use multiple '*' for nested lists in Jira
-        bullet = '*' * (relative_indent + 1)
-        adjusted_line = f"{bullet} {line}"
-        adjusted_lines.append(adjusted_line)
-    return '\n'.join(adjusted_lines)
 
 def main():
     while True:
@@ -191,9 +175,6 @@ def main():
             elif level == 3:
                 node.type = 'Sub-task'
             node.path = path + '/' + node.line
-            # Build the description text here
-            node.description_text = build_description_text(node.description_lines)
-            node.description_text = convert_markdown_links_to_jira(node.description_text)
             for child in node.children:
                 assign_types_and_paths(child, level+1, node.path)
 
@@ -216,37 +197,28 @@ def main():
                 try:
                     issue = jira.issue(issue_key)
                     node.jira_issue = issue
-                    print(f"Processing {node.type} '{node.line}' with key {issue.key}")
-
-                    # Retrieve current description and status
-                    current_description = issue.fields.description or ''
-                    current_status = issue.fields.status.name
-
-                    # Compare descriptions
-                    if current_description.strip() != node.description_text.strip():
-                        # Update description
-                        issue.update(fields={'description': node.description_text})
-                        print(f"Updated description for {issue.key}")
-
-                    # Map custom status to Jira status
+                    print(f"Updating {node.type} '{node.line}' with key {issue.key}")
+                    # Process description
+                    description_text = build_description_text(node.description_lines)
+                    description_text = convert_markdown_links_to_jira(description_text)
+                    # Update summary, description, and assignee
+                    issue.update(fields={
+                        'summary': node.line,
+                        'description': description_text,
+                        'assignee': {'id': account_id}
+                    })
+                    # Set status if needed
                     if node.status and node.status in status_mapping:
                         jira_status = status_mapping[node.status]
-                        if current_status != jira_status:
-                            # Transition issue to new status
-                            transitions = jira.transitions(issue)
-                            transition_id = None
-                            for t in transitions:
-                                if t['name'] == jira_status:
-                                    transition_id = t['id']
-                                    break
-                            if transition_id:
-                                jira.transition_issue(issue, transition_id)
-                                print(f"Updated status of {issue.key} to {jira_status}")
-                    # Update assignee if necessary
-                    if issue.fields.assignee is None or issue.fields.assignee.accountId != account_id:
-                        issue.update(fields={'assignee': {'id': account_id}})
-                        print(f"Assigned {issue.key} to current user")
-
+                        transitions = jira.transitions(issue)
+                        transition_id = None
+                        for t in transitions:
+                            if t['name'] == jira_status:
+                                transition_id = t['id']
+                                break
+                        if transition_id:
+                            jira.transition_issue(issue, transition_id)
+                            print(f"Set status of {issue.key} to {jira_status}")
                 except Exception as e:
                     print(f"Error updating issue {issue_key}: {e}")
                     # Remove from mapping and recreate
@@ -255,10 +227,14 @@ def main():
                     return
             else:
                 # Issue does not exist, create it
+                # Process description
+                description_text = build_description_text(node.description_lines)
+                description_text = convert_markdown_links_to_jira(description_text)
+
                 issue_dict = {
                     'project': {'key': project_key},
                     'summary': node.line,
-                    'description': node.description_text,
+                    'description': description_text,
                     'issuetype': {'name': node.type},
                     'assignee': {'id': account_id},  # Assign to authenticated user
                 }
@@ -327,6 +303,21 @@ def main():
                     child.parent = node
                 create_or_update_issue(child)
 
+        def build_description_text(description_lines):
+            if not description_lines:
+                return ''
+            # Find the minimum indentation level among description lines
+            min_indent = min(indent for indent, _ in description_lines)
+            # Adjust lines to have relative indentation and convert to Jira nested list syntax
+            adjusted_lines = []
+            for indent, line in description_lines:
+                relative_indent = (indent - min_indent) // 4  # Assuming 4 spaces per level
+                # Use multiple '*' for nested lists in Jira
+                bullet = '*' * (relative_indent + 1)
+                adjusted_line = f"{bullet} {line}"
+                adjusted_lines.append(adjusted_line)
+            return '\n'.join(adjusted_lines)
+
         for root in root_nodes:
             create_or_update_issue(root)
 
@@ -336,7 +327,7 @@ def main():
 
         # Sleep for 5 minutes before the next run
         print("Waiting for 5 minutes before the next run...")
-        time.sleep(300)  # 300 seconds = 5 minutes
+        time.sleep(3)  # 300 seconds = 5 minutes
 
 if __name__ == '__main__':
     main()
